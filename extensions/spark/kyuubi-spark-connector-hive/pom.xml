@@ -230,5 +230,45 @@
                 </plugins>
             </build>
         </profile>
+
+        <profile>
+            <id>tclake</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+
+            <distributionManagement>
+                <repository>
+                    <uniqueVersion>false</uniqueVersion>
+                    <id>tclake</id>
+                    <url>https://mirrors.tencent.com/repository/maven/tclake</url>
+                </repository>
+                <snapshotRepository>
+                    <uniqueVersion>false</uniqueVersion>
+                    <id>tclake-snapshot</id>
+                    <url>https://mirrors.tencent.com/repository/maven/tclake-snapshot</url>
+                </snapshotRepository>
+            </distributionManagement>
+
+            <repositories>
+                <repository>
+                    <snapshots>
+                        <enabled>false</enabled>
+                    </snapshots>
+                    <id>tclake-repo</id>
+                    <name>tclake-repo</name>
+                    <url>https://mirrors.tencent.com/repository/maven/tclake</url>
+                </repository>
+
+                <repository>
+                    <snapshots>
+                        <enabled>true</enabled>
+                    </snapshots>
+                    <id>tclake-snapshot-repo</id>
+                    <name>tclake-snapshot-repo</name>
+                    <url>https://mirrors.tencent.com/repository/maven/tclake-snapshot</url>
+                </repository>
+            </repositories>
+        </profile>
     </profiles>
 </project>

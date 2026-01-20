@@ -32,13 +32,14 @@ import org.apache.spark.sql.connector.catalog.TableCapability.{BATCH_READ, BATCH
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.connector.read.ScanBuilder
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
+import org.apache.spark.sql.execution.datasources.v2.csv.CSVScanBuilder
 import org.apache.spark.sql.execution.datasources.v2.orc.OrcScanBuilder
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScanBuilder
 import org.apache.spark.sql.hive.kyuubi.connector.HiveBridgeHelper.{BucketSpecHelper, LogicalExpressions}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import org.apache.kyuubi.spark.connector.hive.KyuubiHiveConnectorConf.{READ_CONVERT_METASTORE_ORC, READ_CONVERT_METASTORE_PARQUET}
+import org.apache.kyuubi.spark.connector.hive.KyuubiHiveConnectorConf.{READ_CONVERT_METASTORE_CSV, READ_CONVERT_METASTORE_ORC, READ_CONVERT_METASTORE_PARQUET}
 import org.apache.kyuubi.spark.connector.hive.read.{HiveCatalogFileIndex, HiveScanBuilder}
 import org.apache.kyuubi.spark.connector.hive.write.HiveWriteBuilder
 
@@ -67,11 +68,14 @@ case class HiveTable(
     val serde = catalogTable.storage.serde.getOrElse("").toUpperCase(Locale.ROOT)
     val parquet = serde.contains("PARQUET")
     val orc = serde.contains("ORC")
+    val csv = serde.contains("OPENCSVSERDE")
     val provider = catalogTable.provider.map(_.toUpperCase(Locale.ROOT))
     if (orc || provider.contains("ORC")) {
       Some("ORC")
     } else if (parquet || provider.contains("PARQUET")) {
       Some("PARQUET")
+    } else if (csv || provider.contains("CSV")) {
+      Some("CSV")
     } else {
       None
     }
@@ -101,6 +105,17 @@ case class HiveTable(
       case Some("PARQUET")
           if sparkSession.sessionState.conf.getConf(READ_CONVERT_METASTORE_PARQUET) =>
         ParquetScanBuilder(sparkSession, fileIndex, schema, dataSchema, options)
+      case Some("CSV")
+          if sparkSession.sessionState.conf.getConf(READ_CONVERT_METASTORE_CSV) =>
+        val newOptions = new util.HashMap[String, String]
+        newOptions.putAll(options)
+        newOptions.putAll(catalogTable.storage.properties.asJava)
+        CSVScanBuilder(
+          sparkSession,
+          fileIndex,
+          schema,
+          dataSchema,
+          new CaseInsensitiveStringMap(newOptions))
       case _ => HiveScanBuilder(sparkSession, fileIndex, dataSchema, catalogTable)
     }
   }

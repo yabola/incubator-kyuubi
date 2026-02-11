@@ -27,7 +27,7 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.hadoop.hive.common.FileUtils
 import org.apache.hadoop.hive.ql.exec.TaskRunner
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.catalog.ExternalCatalogWithListener
+import org.apache.spark.sql.catalyst.catalog.{CatalogTable, ExternalCatalogWithListener}
 import org.apache.spark.sql.hive.kyuubi.connector.HiveBridgeHelper.HiveExternalCatalog
 
 import org.apache.kyuubi.util.SemanticVersion
@@ -178,5 +178,16 @@ object HiveWriteHelper extends Logging {
 
   def cannotCreateStagingDirError(message: String, e: IOException = null): Throwable = {
     new RuntimeException(s"Cannot create staging directory: $message", e)
+  }
+
+  def checkUnspportHiveOperation(catalogTable: CatalogTable): Unit = {
+    val isCSVFileFormat = catalogTable.storage.serde.getOrElse("")
+      .toUpperCase(Locale.ROOT).contains("OPENCSVSERDE") ||
+      catalogTable.properties.getOrElse("provider", "")
+        .equalsIgnoreCase("csv")
+    if (catalogTable.properties.contains("uris") && isCSVFileFormat) {
+      throw new UnsupportedOperationException(s"Hive CSV tables with the uris property defined" +
+        s" are read-only; INSERTs are prohibited.")
+    }
   }
 }

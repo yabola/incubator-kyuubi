@@ -21,6 +21,7 @@ import java.net.URI
 
 import scala.collection.mutable
 
+import org.apache.commons.lang3.StringUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.spark.sql.SparkSession
@@ -169,6 +170,12 @@ class HiveInMemoryFileIndex(
     def isNonEmptyFile(f: FileStatus): Boolean = {
       isDataPath(f.getPath) && f.getLen > 0
     }
+    val uris = parameters.getOrElse("uris", "")
+    if (StringUtils.isNotBlank(uris)) {
+      return HiveConnectorUtils.createPartitionDirectory(
+        InternalRow.empty,
+        filesByUris(uris).filter(isNonEmptyFile)) :: Nil
+    }
     val selectedPartitions =
       if (partitionSpec().partitionColumns.isEmpty) {
         HiveConnectorUtils.createPartitionDirectory(
@@ -234,6 +241,31 @@ class HiveInMemoryFileIndex(
     } else {
       partitions
     }
+  }
+
+  private val uriToStatusCache = mutable.Map[Path, FileStatus]()
+
+  private def filesByUris(uris: String): Seq[FileStatus] = {
+    if (StringUtils.isNotBlank(uris)) {
+      uris.split(",").distinct.flatMap { uri =>
+        val path = new Path(uri)
+        val fs = path.getFileSystem(hadoopConf)
+        if (isGlobPath(path)) {
+          Option(fs.globStatus(path)).getOrElse(Array.empty).toSeq
+        } else {
+          Seq(uriToStatusCache.getOrElseUpdate(
+            path, {
+              fs.getFileStatus(path)
+            }))
+        }
+      }.toSeq
+    } else {
+      Seq.empty
+    }
+  }
+
+  private def isGlobPath(path: Path): Boolean = {
+    path.toString.exists("{}[]*?".toSet)
   }
 
   private def isDataPath(path: Path): Boolean = {

@@ -30,6 +30,8 @@ import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, PhysicalWriteInfo, WriterCommitMessage}
 import org.apache.spark.sql.execution.datasources.{WriteJobDescription, WriteTaskResult}
 import org.apache.spark.sql.execution.datasources.v2.FileBatchWrite
+import org.apache.spark.sql.hive.kyuubi.connector.HiveBridgeHelper.HiveExternalCatalog
+import org.apache.spark.sql.hive.kyuubi.connector.HiveBridgeHelper.hive
 import org.apache.spark.sql.hive.kyuubi.connector.HiveBridgeHelper.toSQLValue
 import org.apache.spark.sql.types.StringType
 
@@ -169,8 +171,22 @@ class HiveBatchWrite(
           partitionColumnNames,
           tablePath)
 
+        val hiveVersion = externalCatalog.asInstanceOf[ExternalCatalogWithListener]
+          .unwrapped.asInstanceOf[HiveExternalCatalog]
+          .client
+          .version
         val fs = partitionPath.getFileSystem(hadoopConf)
-        if (fs.exists(partitionPath)) {
+        // SPARK-31684:
+        // For Hive 2.0.0 and onwards, as https://issues.apache.org/jira/browse/HIVE-11940
+        // has been fixed, and there is no performance issue anymore. We should leave the
+        // overwrite logic to hive to avoid failure in `FileSystem#checkPath` when the table
+        // and partition locations do not belong to the same `FileSystem`
+        // TODO(SPARK-31675): For Hive 2.2.0 and earlier, if the table and partition locations
+        // do not belong together, we will still get the same error thrown by hive encryption
+        // check. see https://issues.apache.org/jira/browse/HIVE-14380.
+        // So we still disable for Hive overwrite for Hive 1.x for better performance because
+        // the partition and table are on the same cluster in most cases.
+        if (fs.exists(partitionPath) && hiveVersion < hive.v2_0) {
           if (!fs.delete(partitionPath, true)) {
             throw KyuubiHiveConnectorException(s"Cannot remove partition directory " +
               s"'$partitionPath'")

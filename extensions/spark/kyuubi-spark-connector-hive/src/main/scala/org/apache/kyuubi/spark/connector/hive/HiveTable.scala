@@ -17,6 +17,7 @@
 
 package org.apache.kyuubi.spark.connector.hive
 
+import java.net.URI
 import java.util
 import java.util.Locale
 
@@ -26,8 +27,11 @@ import scala.collection.mutable
 import org.apache.hadoop.fs.Path
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.catalog.CatalogTable
-import org.apache.spark.sql.connector.catalog.{SupportsRead, SupportsWrite, Table, TableCapability}
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.analysis.NoSuchPartitionException
+import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTablePartition}
+import org.apache.spark.sql.catalyst.expressions.{Cast, GenericInternalRow, Literal}
+import org.apache.spark.sql.connector.catalog.{SupportsPartitionManagement, SupportsRead, SupportsWrite, Table, TableCapability}
 import org.apache.spark.sql.connector.catalog.TableCapability.{BATCH_READ, BATCH_WRITE, OVERWRITE_BY_FILTER, OVERWRITE_DYNAMIC}
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.connector.read.ScanBuilder
@@ -36,18 +40,18 @@ import org.apache.spark.sql.execution.datasources.v2.csv.CSVScanBuilder
 import org.apache.spark.sql.execution.datasources.v2.orc.OrcScanBuilder
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScanBuilder
 import org.apache.spark.sql.hive.kyuubi.connector.HiveBridgeHelper.{BucketSpecHelper, LogicalExpressions}
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{StringType, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import org.apache.kyuubi.spark.connector.hive.KyuubiHiveConnectorConf.{READ_CONVERT_METASTORE_CSV, READ_CONVERT_METASTORE_ORC, READ_CONVERT_METASTORE_PARQUET}
 import org.apache.kyuubi.spark.connector.hive.read.{HiveCatalogFileIndex, HiveScanBuilder}
-import org.apache.kyuubi.spark.connector.hive.write.HiveWriteBuilder
+import org.apache.kyuubi.spark.connector.hive.write.{HiveWriteBuilder, HiveWriteHelper}
 
 case class HiveTable(
     sparkSession: SparkSession,
     catalogTable: CatalogTable,
     hiveTableCatalog: HiveTableCatalog)
-  extends Table with SupportsRead with SupportsWrite with Logging {
+  extends Table with SupportsRead with SupportsWrite with SupportsPartitionManagement with Logging {
 
   lazy val dataSchema: StructType = catalogTable.dataSchema
 
@@ -85,7 +89,19 @@ case class HiveTable(
 
   override def schema(): StructType = catalogTable.schema
 
-  override def properties(): util.Map[String, String] = catalogTable.properties.asJava
+  override def properties(): util.Map[String, String] = {
+    val props = new util.HashMap[String, String](catalogTable.properties.asJava)
+    props.put(HiveTableProperties.TABLE_TYPE, catalogTable.tableType.name)
+    catalogTable.storage.locationUri.map(_.toString)
+      .foreach(props.put(HiveTableProperties.LOCATION, _))
+    catalogTable.storage.inputFormat.foreach(props.put(HiveTableProperties.INPUT_FORMAT, _))
+    catalogTable.storage.outputFormat.foreach(props.put(HiveTableProperties.OUTPUT_FORMAT, _))
+    catalogTable.storage.serde.foreach(props.put(HiveTableProperties.SERDE_LIB, _))
+    catalogTable.storage.properties.foreach { case (k, v) =>
+      props.put(HiveTableProperties.SERDE_PARAMETER_PREFIX + k, v)
+    }
+    props
+  }
 
   override def partitioning: Array[Transform] = {
     val partitions = new mutable.ArrayBuffer[Transform]()
@@ -121,10 +137,91 @@ case class HiveTable(
   }
 
   override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {
+    HiveWriteHelper.checkUnspportHiveOperation(catalogTable)
     HiveWriteBuilder(sparkSession, catalogTable, info, hiveTableCatalog)
   }
 
   override def capabilities(): util.Set[TableCapability] = {
     util.EnumSet.of(BATCH_READ, BATCH_WRITE, OVERWRITE_BY_FILTER, OVERWRITE_DYNAMIC)
+  }
+
+  override def createPartition(ident: InternalRow, properties: util.Map[String, String]): Unit = {
+    HiveWriteHelper.checkUnspportHiveOperation(catalogTable)
+    val spec = toPartitionSpec(ident)
+    val location = Option(properties.get(HiveTableProperties.LOCATION)).map(new URI(_))
+    val newPart = CatalogTablePartition(
+      spec,
+      catalogTable.storage.copy(locationUri = location),
+      properties.asScala.toMap)
+    hiveTableCatalog.externalCatalog.createPartitions(
+      catalogTable.database,
+      catalogTable.identifier.table,
+      Seq(newPart),
+      ignoreIfExists = false)
+  }
+
+  override def dropPartition(ident: InternalRow): Boolean = {
+    try {
+      hiveTableCatalog.externalCatalog.dropPartitions(
+        catalogTable.database,
+        catalogTable.identifier.table,
+        Seq(toPartitionSpec(ident)),
+        ignoreIfNotExists = false,
+        purge = false,
+        retainData = false)
+      true
+    } catch {
+      case _: NoSuchPartitionException => false
+    }
+  }
+
+  override def replacePartitionMetadata(
+      ident: InternalRow,
+      properties: util.Map[String, String]): Unit = {
+    throw new UnsupportedOperationException("Replace partition is not supported")
+  }
+
+  override def loadPartitionMetadata(ident: InternalRow): util.Map[String, String] = {
+    throw new UnsupportedOperationException("Replace partition is not supported")
+  }
+
+  override def listPartitionIdentifiers(
+      names: Array[String],
+      ident: InternalRow): Array[InternalRow] = {
+    val partialSpec = if (names.isEmpty) {
+      None
+    } else {
+      val fields = names.map(partitionSchema(_))
+      val schema = StructType(fields)
+      Some(toPartitionSpec(ident, schema))
+    }
+    hiveTableCatalog.externalCatalog.listPartitions(
+      catalogTable.database,
+      catalogTable.identifier.table,
+      partialSpec).map { part =>
+      val values = partitionSchema.map { field =>
+        val strValue = part.spec(field.name)
+        Cast(Literal(strValue), field.dataType).eval()
+      }
+      new GenericInternalRow(values.toArray)
+    }.toArray
+  }
+
+  private def toPartitionSpec(ident: InternalRow, schema: StructType): Map[String, String] = {
+    require(
+      schema.size == ident.numFields,
+      s"Schema size (${schema.size}) does not match numFields (${ident.numFields})")
+    schema.zipWithIndex.map { case (field, index) =>
+      val value = ident.get(index, field.dataType)
+      val filedValue = Cast(
+        Literal(value, field.dataType),
+        StringType,
+        Some(sparkSession.sessionState.conf.sessionLocalTimeZone)).eval().toString
+      field.name -> filedValue
+    }.toMap
+  }
+
+  private def toPartitionSpec(ident: InternalRow): Map[String, String] = {
+    toPartitionSpec(ident, partitionSchema)
   }
 }

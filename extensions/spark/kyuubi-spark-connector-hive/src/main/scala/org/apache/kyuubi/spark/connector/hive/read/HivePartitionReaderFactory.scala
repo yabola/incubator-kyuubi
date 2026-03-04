@@ -137,6 +137,18 @@ case class HivePartitionReaderFactory(
         if (reader == null) null.asInstanceOf[Writable] else reader.createKey()
       val value: Writable =
         if (reader == null) null.asInstanceOf[Writable] else reader.createValue()
+      // Handle skip.header.line.count property, skip the specified number of header lines
+      if (reader != null && fileSplit.getStart == 0) {
+        val skipHeaderCount = tableDesc match {
+          case td if td != null =>
+            td.getProperties.getProperty("skip.header.line.count", "0").toInt
+          case _ => 0
+        }
+        var skipped = 0
+        while (skipped < skipHeaderCount && reader.next(key, value)) {
+          skipped += 1
+        }
+      }
 
       override def getNext(): Writable = {
         try {

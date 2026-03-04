@@ -72,13 +72,12 @@ case class HiveTable(
     val serde = catalogTable.storage.serde.getOrElse("").toUpperCase(Locale.ROOT)
     val parquet = serde.contains("PARQUET")
     val orc = serde.contains("ORC")
-    val csv = serde.contains("OPENCSVSERDE")
     val provider = catalogTable.provider.map(_.toUpperCase(Locale.ROOT))
     if (orc || provider.contains("ORC")) {
       Some("ORC")
     } else if (parquet || provider.contains("PARQUET")) {
       Some("PARQUET")
-    } else if (csv || provider.contains("CSV")) {
+    } else if (provider.isDefined && provider.contains("CSV")) {
       Some("CSV")
     } else {
       None

@@ -33,7 +33,11 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.connector.write.{BatchWrite, LogicalWriteInfo, Write}
+import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, WriteJobDescription}
+import org.apache.spark.sql.execution.datasources.csv.CSVFileFormat
+import org.apache.spark.sql.execution.datasources.orc.OrcFileFormat
+import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.execution.datasources.v2.FileBatchWrite
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.hive.execution.HiveOptions
@@ -119,9 +123,20 @@ case class HiveWrite(
       pathName: String,
       customPartitionLocations: Map[TablePartitionSpec, String],
       options: Map[String, String]): WriteJobDescription = {
-    val hiveFileFormat = getHiveFileFormat(fileSinkConf)
     val dataSchema = StructType(info.schema().fields.take(dataColumns.length))
-    val outputWriterFactory = hiveFileFormat.prepareWrite(sparkSession, job, options, dataSchema)
+    val outputWriterFactory = table.provider match {
+      case Some(provider) if !DDLUtils.isHiveTable(table.provider) =>
+        val fileFormat = provider.toLowerCase(Locale.ROOT) match {
+          case "parquet" => new ParquetFileFormat()
+          case "orc" => new OrcFileFormat()
+          case "csv" => new CSVFileFormat()
+          case _ => getHiveFileFormat(fileSinkConf)
+        }
+        fileFormat.prepareWrite(sparkSession, job, options, dataSchema)
+      case _ =>
+        val hiveFileFormat = getHiveFileFormat(fileSinkConf)
+        hiveFileFormat.prepareWrite(sparkSession, job, options, dataSchema)
+    }
     val metrics: Map[String, SQLMetric] = BasicWriteJobStatsTracker.metrics
     val serializableHadoopConf = new SerializableConfiguration(hadoopConf)
     val statsTracker = new BasicWriteJobStatsTracker(serializableHadoopConf, metrics)

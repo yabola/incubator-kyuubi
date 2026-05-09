@@ -253,10 +253,25 @@ class HiveInMemoryFileIndex(
         if (isGlobPath(path)) {
           Option(fs.globStatus(path)).getOrElse(Array.empty).toSeq
         } else {
-          Seq(uriToStatusCache.getOrElseUpdate(
-            path, {
-              fs.getFileStatus(path)
-            }))
+          uriToStatusCache.get(path) match {
+            case Some(status) if status != null && fs.exists(path) =>
+              Seq(status)
+            case _ =>
+              uriToStatusCache.remove(path)
+              if (fs.exists(path)) {
+                val status = fs.getFileStatus(path)
+                if (status != null) {
+                  uriToStatusCache.update(path, status)
+                  Seq(status)
+                } else {
+                  logWarning(s"FileStatus of path $path is null, skipping.")
+                  Seq.empty
+                }
+              } else {
+                logWarning(s"Path $path does not exist, skipping.")
+                Seq.empty
+              }
+          }
         }
       }.toSeq
     } else {
